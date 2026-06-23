@@ -66,16 +66,16 @@ DB.loggers << Logger.new($stdout) if ENV['RACK_ENV'] == 'development'
 
 class User < Sequel::Model(DB[:users])
   many_to_one :template
-  many_to_one :operation
+  one_to_many :operation
 end
 
 class Product < Sequel::Model(DB[:products])
 end
 
 class Template < Sequel::Model(DB[:templates])
-  one_to_many :users
+  one_to_many :user
 end
 
 class Operation < Sequel::Model(DB[:operations])
-  one_to_many :users
+  many_to_one :user
 end

@@ -104,10 +104,10 @@ post '/operation' do
     cashback_percent: cashback_percent,
     discount: discount_value,
     discount_percent: discount_percent,
-    write_off: user.bonus,
+    write_off: nil,
     check_summ: current_total,
     done: false,
-    allowed_write_off: user.bonus
+    allowed_write_off: current_total > user.bonus ? user.bonus : current_total
   ).save(raise_on_failure: true)
 
   content_type :json
@@ -136,11 +136,66 @@ post '/operation' do
 end
 
 post '/submit' do
-  data = JSON.parse(request.body.read)
-
   content_type :json
+  data = JSON.parse(request.body.read)
+  operation = Operation.eager(:user).with_pk(data['operation_id'])
+  if operation.nil?
+    halt(404, json_error("Operation id=#{data['operation_id']} not found"))
+  end
+  if data.dig('user', 'id') != operation.user.id
+    halt(403, json_error("Operation id=#{data['operation_id']} forbidden submit"))
+  end
+
+  write_off = BigDecimal(data['write_off'])
+
+  err = nil
+
+  # SQLite not support FOR UPDATE and this is done using the transaction isolation level
+  Operation.db.transaction(mode: :immediate) do
+    user = User.for_update.with_pk(operation.user_id)
+    operation = Operation.for_update.with_pk(operation.id)
+    if write_off > operation.check_summ
+      err = json_error(
+        "Operation id=#{data['operation_id']} not allowed because the amount " \
+        "to be debited exceeds the amount of the receipt"
+      )
+      raise Sequel::Rollback
+    end
+    if write_off > operation.user.bonus
+      err = json_error(
+        "Operation id=#{data['operation_id']} not allowed because the amount " \
+        "to be debited exceeds the user's bonuses"
+      )
+      raise Sequel::Rollback
+    end
+    operation.done = true
+    operation.write_off = write_off
+    operation.save
+    user.bonus = user.bonus - write_off
+    user.save
+  end
+
+  halt(403, err) if err
+
   {
-    'status' => 'OK'
+    'status' => 'OK',
+    'message' => 'SUCCESS',
+    'operation' => {
+      'user_id' => operation.user_id,
+      'cashback' => operation.cashback.to_s('F'),
+      'cashback_percent' => operation.cashback_percent.to_s('F'),
+      'discount' => operation.discount.to_s('F'),
+      'discount_percent' => operation.discount_percent.to_s('F'),
+      'write_off' => operation.write_off.to_s('F'),
+      'amount_payable' => (operation.check_summ - operation.write_off).to_s('F')
+    }
+  }.to_json
+end
+
+def json_error(message)
+  {
+    'status' => 'ERROR',
+    'message' => message
   }.to_json
 end
 
