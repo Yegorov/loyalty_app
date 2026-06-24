@@ -1,12 +1,6 @@
 require 'helper'
 
 class AppTest < BaseTest
-  def test_home
-    get '/'
-    assert last_response.ok?
-    assert_equal 'Hello', last_response.body
-  end
-
   def test_seed_db
     assert_equal 0, DB['SELECT COUNT(1) AS count FROM templates'].to_a.first[:count]
     assert_equal 0, DB['SELECT COUNT(1) AS count FROM users'].to_a.first[:count]
@@ -17,6 +11,24 @@ class AppTest < BaseTest
     assert_equal 3, DB['SELECT COUNT(1) AS count FROM users'].to_a.first[:count]
     assert_equal 3, DB['SELECT COUNT(1) AS count FROM products'].to_a.first[:count]
     assert_equal 0, DB['SELECT COUNT(1) AS count FROM operations'].to_a.first[:count]
+  end
+
+  def test_operation_with_not_found_user
+    seed_db
+    payload = {
+      'user_id' => 10000001,
+      'positions' => [
+        { "id" => 2, "price" => 200, "quantity" => 3 },
+        { "id" => 1002, "price" => 350, "quantity" => 2 }
+      ]
+    }
+    post '/operation', payload.to_json, { 'CONTENT_TYPE' => 'application/json' }
+
+    refute last_response.ok?
+    assert_equal 404, last_response.status
+    response = JSON.parse(last_response.body)
+    assert_equal 'ERROR', response['status']
+    assert_equal 'User id=10000001 not found', response['message']
   end
 
   def test_operation_with_unknown_product
@@ -38,11 +50,16 @@ class AppTest < BaseTest
     assert_equal 3, response.dig('user', 'id')
     assert_equal 'Женя', response.dig('user', 'name')
     assert_equal '1105.0', response['check_summ']
+    assert_equal '10000.0', response.dig('bonus', 'balance')
+    assert_equal '1105.0', response.dig('bonus', 'allowed_write_off')
     assert_equal '4.62', response.dig('bonus', 'percent')
     assert_equal '51.0', response.dig('bonus', 'value')
     assert_equal '15.0', response.dig('discount', 'percent')
     assert_equal '195.0', response.dig('discount', 'value')
     response.dig('positions', 0).then do |p|
+      assert_equal 2, p['id']
+      assert_in_delta 200, p['price']
+      assert_equal 3, p['quantity']
       assert_equal 'increased_cashback', p['type']
       assert_equal '10', p['value']
       assert_equal 'Молоко', p['description']
@@ -51,6 +68,9 @@ class AppTest < BaseTest
       assert_equal '90.0', p['total_discount_value']
     end
     response.dig('positions', 1).then do |p|
+      assert_equal 1002, p['id']
+      assert_in_delta 350, p['price']
+      assert_equal 2, p['quantity']
       assert_nil p['type']
       assert_nil p['value']
       assert_nil p['description']
@@ -89,23 +109,34 @@ class AppTest < BaseTest
     assert_equal 'OK', response['status']
     assert_predicate response['operation_id'], :positive?
     assert_equal '658.0', response['check_summ']
+    assert_equal '10000.0', response.dig('bonus', 'balance')
+    assert_equal '608.0', response.dig('bonus', 'allowed_write_off')
     assert_equal '8.95', response.dig('bonus', 'percent')
     assert_equal '58.9', response.dig('bonus', 'value')
     assert_equal '12.27', response.dig('discount', 'percent')
     assert_equal '92.0', response.dig('discount', 'value')
     response.dig('positions', 0).then do |p|
+      assert_equal 2, p['id']
+      assert_in_delta 100, p['price']
+      assert_equal 3, p['quantity']
       assert_equal 'increased_cashback', p['type']
       assert_equal '5.0', p['discount_percent']
       assert_equal '5.0', p['discount_value']
       assert_equal '15.0', p['total_discount_value']
     end
     response.dig('positions', 1).then do |p|
+      assert_equal 3, p['id']
+      assert_in_delta 200, p['price']
+      assert_equal 2, p['quantity']
       assert_equal 'discount', p['type']
       assert_equal '19.25', p['discount_percent']
       assert_equal '38.5', p['discount_value']
       assert_equal '77.0', p['total_discount_value']
     end
     response.dig('positions', 2).then do |p|
+      assert_equal 4, p['id']
+      assert_in_delta 50, p['price']
+      assert_equal 1, p['quantity']
       assert_equal 'noloyalty', p['type']
       assert_equal '0.0', p['discount_percent']
       assert_equal '0.0', p['discount_value']
@@ -120,7 +151,7 @@ class AppTest < BaseTest
       assert_nil operation.write_off
       assert_in_delta 658, operation.check_summ
       refute operation.done
-      assert_in_delta 658, operation.allowed_write_off
+      assert_in_delta 608, operation.allowed_write_off
     end
   end
 
@@ -139,12 +170,7 @@ class AppTest < BaseTest
       allowed_write_off: BigDecimal(900)
     ).save(raise_on_failure: true)
     payload = {
-      'user' => {
-        'id' => user.id,
-        'template_id' => user.template_id,
-        'name' => user.name,
-        'bonus' => user.bonus.to_s('F')
-      },
+      'user_id' => user.id,
       'operation_id' => operation.id,
       'write_off' => 300
     }
@@ -179,12 +205,7 @@ class AppTest < BaseTest
     seed_db
     user = User.with_pk(1)
     payload = {
-      'user' => {
-        'id' => user.id,
-        'template_id' => user.template_id,
-        'name' => user.name,
-        'bonus' => user.bonus.to_s('F')
-      },
+      'user_id' => user.id,
       'operation_id' => 10000001,
       'write_off' => 300
     }
@@ -213,12 +234,7 @@ class AppTest < BaseTest
       allowed_write_off: BigDecimal(900)
     ).save(raise_on_failure: true)
     payload = {
-      'user' => {
-        'id' => user2.id,
-        'template_id' => user2.template_id,
-        'name' => user2.name,
-        'bonus' => user2.bonus.to_s('F')
-      },
+      'user_id' => user2.id,
       'operation_id' => operation.id,
       'write_off' => 300
     }
@@ -258,12 +274,7 @@ class AppTest < BaseTest
       allowed_write_off: BigDecimal(900)
     ).save(raise_on_failure: true)
     payload = {
-      'user' => {
-        'id' => user.id,
-        'template_id' => user.template_id,
-        'name' => user.name,
-        'bonus' => user.bonus.to_s('F')
-      },
+      'user_id' => user.id,
       'operation_id' => operation.id,
       'write_off' => 1000
     }
@@ -306,12 +317,7 @@ class AppTest < BaseTest
       allowed_write_off: BigDecimal(10000)
     ).save(raise_on_failure: true)
     payload = {
-      'user' => {
-        'id' => user.id,
-        'template_id' => user.template_id,
-        'name' => user.name,
-        'bonus' => user.bonus.to_s('F')
-      },
+      'user_id' => user.id,
       'operation_id' => operation.id,
       'write_off' => 10001
     }
@@ -337,5 +343,50 @@ class AppTest < BaseTest
     assert_in_delta 10000, operation.allowed_write_off
     user.reload
     assert_in_delta 10000, user.bonus
+  end
+
+  def test_submit_done_operation
+    seed_db
+    user = User.with_pk(1)
+    user.bonus -= 300
+    user.save
+    operation = Operation.new(
+      user_id: user.id,
+      cashback: BigDecimal(18),
+      cashback_percent: BigDecimal(2),
+      discount: BigDecimal(100),
+      discount_percent: BigDecimal(10),
+      write_off: 300,
+      check_summ: BigDecimal(900),
+      done: true,
+      allowed_write_off: BigDecimal(900)
+    ).save(raise_on_failure: true)
+    payload = {
+      'user_id' => user.id,
+      'operation_id' => operation.id,
+      'write_off' => 300
+    }
+    post '/submit', payload.to_json, { 'CONTENT_TYPE' => 'application/json' }
+
+    refute last_response.ok?
+    assert_equal 409, last_response.status
+    response = JSON.parse(last_response.body)
+    assert_equal 'ERROR', response['status']
+    assert_equal(
+      'Operation id=1 already done',
+      response['message']
+    )
+    operation.reload
+    assert_equal user.id, operation.user_id
+    assert_in_delta 18, operation.cashback
+    assert_in_delta 2, operation.cashback_percent
+    assert_in_delta 100, operation.discount
+    assert_in_delta 10, operation.discount_percent
+    assert_in_delta 300, operation.write_off
+    assert_in_delta 900, operation.check_summ
+    assert operation.done
+    assert_in_delta 900, operation.allowed_write_off
+    user.reload
+    assert_in_delta 9700, user.bonus
   end
 end

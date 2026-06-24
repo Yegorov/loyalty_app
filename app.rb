@@ -5,14 +5,14 @@ ENV['RACK_ENV'] ||= 'development'
 require 'sinatra'
 require_relative 'db'
 
-get '/' do
-  'Hello'
-end
-
 post '/operation' do
   data = JSON.parse(request.body.read)
 
   user = User.eager(:template).with_pk(data['user_id'])
+  if user.nil?
+    halt(*json_error("User id=#{data['user_id']} not found", code: 404))
+  end
+
   products = Product.where(id: data['positions'].map { it['id'].to_i }.uniq)
   products_hash = {}
   products.each { |p| products_hash[p.id.to_i] = p }
@@ -51,13 +51,16 @@ post '/operation' do
     if product&.type == 'noloyalty'
       cashbacks = []
     end
-    cashback_value = 0
+    cashback_value = BigDecimal(0)
     cashbacks.each do |cashback|
       cashback_value += cashback.call(current_price)
     end
 
     positions << {
       'response' => {
+        'id' => position['id'],
+        'price' => position['price'],
+        'quantity' => position['quantity'],
         'type' => product&.type,
         'value' => product&.value,
         'description' => product&.name,
@@ -66,6 +69,7 @@ post '/operation' do
         'total_discount_value' => ((price - current_price) * quantity).to_s('F')
       },
       'data' => {
+        'type' => product&.type,
         'price' => price,
         'current_price' => current_price,
         'total_price' => price * quantity,
@@ -82,12 +86,12 @@ post '/operation' do
     }
   end
 
-  total = 0
-  current_total = 0
-  cashback_percent = 0
-  cashback_value = 0
-  discount_percent = 0
-  discount_value = 0
+  total = BigDecimal(0)
+  current_total = BigDecimal(0)
+  cashback_percent = BigDecimal(0)
+  cashback_value = BigDecimal(0)
+  discount_percent = BigDecimal(0)
+  discount_value = BigDecimal(0)
 
   positions.each do |position|
     total += position.dig('data', 'total_price')
@@ -98,6 +102,10 @@ post '/operation' do
   discount_percent = (discount_value / total * 100).round(2)
   cashback_percent = (cashback_value / current_total * 100).round(2)
 
+  not_allowed = positions.sum { it.dig('data', 'type') == 'noloyalty' ? it.dig('data', 'total_current_price') : 0 }
+  allowed_write_off = current_total - not_allowed
+  allowed_write_off = allowed_write_off > user.bonus ? user.bonus : allowed_write_off
+
   operation = Operation.new(
     user_id: user.id,
     cashback: cashback_value,
@@ -107,7 +115,7 @@ post '/operation' do
     write_off: nil,
     check_summ: current_total,
     done: false,
-    allowed_write_off: current_total > user.bonus ? user.bonus : current_total
+    allowed_write_off: allowed_write_off
   ).save(raise_on_failure: true)
 
   content_type :json
@@ -123,7 +131,7 @@ post '/operation' do
     'check_summ' => current_total.to_s('F'),
     'bonus' => {
       'balance' => user.bonus.to_s('F'),
-      'write_off' => user.bonus.to_s('F'),
+      'allowed_write_off' => operation.allowed_write_off.to_s('F'),
       'percent' => cashback_percent.to_s('F'),
       'value' => cashback_value.to_s('F')
     },
@@ -138,12 +146,12 @@ end
 post '/submit' do
   content_type :json
   data = JSON.parse(request.body.read)
-  operation = Operation.eager(:user).with_pk(data['operation_id'])
+  operation = Operation.with_pk(data['operation_id'])
   if operation.nil?
-    halt(404, json_error("Operation id=#{data['operation_id']} not found"))
+    halt(*json_error("Operation id=#{data['operation_id']} not found", code: 404))
   end
-  if data.dig('user', 'id') != operation.user.id
-    halt(403, json_error("Operation id=#{data['operation_id']} forbidden submit"))
+  if data['user_id'] != operation.user_id
+    halt(*json_error("Operation id=#{data['operation_id']} forbidden submit", code: 403))
   end
 
   write_off = BigDecimal(data['write_off'])
@@ -154,17 +162,23 @@ post '/submit' do
   Operation.db.transaction(mode: :immediate) do
     user = User.for_update.with_pk(operation.user_id)
     operation = Operation.for_update.with_pk(operation.id)
+    if operation.done
+      err = json_error("Operation id=#{data['operation_id']} already done", code: 409)
+      raise Sequel::Rollback
+    end
     if write_off > operation.check_summ
       err = json_error(
         "Operation id=#{data['operation_id']} not allowed because the amount " \
-        "to be debited exceeds the amount of the receipt"
+        "to be debited exceeds the amount of the receipt",
+        code: 403
       )
       raise Sequel::Rollback
     end
-    if write_off > operation.user.bonus
+    if write_off > user.bonus
       err = json_error(
         "Operation id=#{data['operation_id']} not allowed because the amount " \
-        "to be debited exceeds the user's bonuses"
+        "to be debited exceeds the user's bonuses",
+        code: 403
       )
       raise Sequel::Rollback
     end
@@ -175,7 +189,7 @@ post '/submit' do
     user.save
   end
 
-  halt(403, err) if err
+  halt(*err) if err
 
   {
     'status' => 'OK',
@@ -192,11 +206,14 @@ post '/submit' do
   }.to_json
 end
 
-def json_error(message)
-  {
-    'status' => 'ERROR',
-    'message' => message
-  }.to_json
+def json_error(message, code: 400)
+  [
+    code,
+    {
+      'status' => 'ERROR',
+      'message' => message
+    }.to_json
+  ]
 end
 
 class PercentDiscount
